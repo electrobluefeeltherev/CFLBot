@@ -1,0 +1,9 @@
+.env
+BotToken.txt
+ClientSecret.txt
+*.db
+__pycache__/
+*.pyc
+.venv/
+venv/
+.DB_Store
