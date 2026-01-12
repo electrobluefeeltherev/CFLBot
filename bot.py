@@ -142,7 +142,7 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 
 @bot.event
 async def on_ready():
-    print(f'Logged in as {bot.user}, (IDL: {bot.user.id})')
+    print(f'Logged in as {bot.user}, (ID: {bot.user.id})')
     print('----------')
 
 @bot.tree.command(name="startauction", description="Let the auction begin!")
