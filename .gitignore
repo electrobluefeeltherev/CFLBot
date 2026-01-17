@@ -8,3 +8,5 @@ __pycache__/
 venv/
 .DB_Store
 note.txt
+images/*
+webpages/*
