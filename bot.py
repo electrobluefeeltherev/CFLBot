@@ -32,8 +32,10 @@ def init_database():
             name                        TEXT PRIMARY KEY,
             shorthandle                 TEXT NOT NULL,
             created_at                  TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            budget                       INTEGER DEFAULT 145000000,
+            budget                      INTEGER DEFAULT 0,
             captain_id                  TEXT NOT NULL,
+            teamrole_id                 TEXT,
+            captainrole_id              TEXT,
             total_runs                  INTEGER DEFAULT 0,
             matches_played              INTEGER DEFAULT 0
         );
@@ -137,6 +139,14 @@ intents.members = True
 IST = pytz.timezone("Asia/Kolkata")
 auction_reminder = None
 
+auction_active = False
+auction_channel = None
+current_player_id = None
+current_bid = 0
+highest_bidder_id = None
+highest_bidder_team = None
+bid_timer_task = None
+
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 
@@ -145,24 +155,244 @@ async def on_ready():
     print(f'Logged in as {bot.user}, (ID: {bot.user.id})')
     print('----------')
 
+async def get_next_unsold_player():
+    try:
+        with sqlite3.connect(DB_PATH) as conn:
+            c = conn.cursor()
+            c.execute(
+                """
+                SELECT user_id FROM players WHERE team_name IS NULL OR team_name = '' ORDER BY joined_at ASC LIMIT 1
+                """
+            )
+            row = c.fetchone()
+            return row[0] if row else None
+    except Exception as e:
+        print(f"Error getting unsold player: {e}")
+        return None
+
+async def finalize_sale():
+    global current_player_id, current_bid, highest_bidder_team
+
+    await auction_channel.send(f"**SOLD** <@{current_player_id}> to {highest_bidder_team}\nfor **{current_bid}**")
+
+    with sqlite3.connect(DB_PATH) as conn:
+        c = conn.cursor()
+        c.execute("UPDATE players SET team_name = ? WHERE user_id = ?", (highest_bidder_team, current_player_id))
+        c.execute("UPDATE teams SET budget = budget - ? WHERE name = ?", (current_bid, highest_bidder_team))
+        conn.commit()
+
+    with sqlite3.connect(DB_PATH) as conn:
+        c = conn.cursor()
+        c.execute("SELECT teamrole_id FROM teams WHERE name = ?", (highest_bidder_team,))
+        role_id = c.fetchone()[0]
+    
+    guild = auction_channel.guild
+    role = guild.get_role(int(role_id))
+    member = guild.get_member(int(current_player_id))
+
+    if role and member:
+        await member.add_roles(role)
+
+async def bid_timer():
+    global current_bid, bid_timer_task
+
+    try:
+        await asyncio.sleep(15)
+
+        if current_bid == 0:
+            await auction_channel.send(f"**No bids** for <@{current_player_id}>; Player skipped")
+
+            try:
+                with sqlite3.connect(DB_PATH) as conn:
+                    c = conn.cursor()
+                    c.execute("UPDATE players SET team_name = '__No_Bids__'  WHERE user_id = ?", (current_player_id,))
+                    conn.commit()
+
+            except Exception as e:
+                print(f"Error marking player skipped: {e}")
+        else:
+            await finalize_sale()
+
+        await start_player_auction()
+
+    except asyncio.CancelledError:
+        pass
+
+async def start_player_auction():
+    global current_player_id, current_bid
+    global highest_bidder_id, highest_bidder_team
+    global bid_timer_task, auction_active
+
+    if auction_channel is None:
+        print("Auction channel not set. Aborting auction")
+        auction_active = False
+        return
+
+    current_player_id = await get_next_unsold_player()
+
+    if current_player_id is None:
+        auction_active = False
+        current_player_id = None
+        current_bid = 0
+        highest_bidder_id = None
+        highest_bidder_team = None
+
+        await auction_channel.send("Auction finished, no unsold players")
+        return
+    
+    current_bid = 0
+    highest_bidder_id = None
+    highest_bidder_team = None
+
+    PlayerEmbed = discord.Embed(
+        title="Player up for Auction",
+        description=f"<@{current_player_id}> is now open for bidding\n\nUse !bid <amount>\n\nExample:\n!bid 10M\n!bid 10000000",
+        color= discord.Color.blue()
+    )
+    PlayerEmbed.add_field(name="Current Bid", value="No bids yet", inline=False)
+    PlayerEmbed.add_field(name="Time remaining", value="15s", inline=False)
+
+    await auction_channel.send(embed=PlayerEmbed)
+    if bid_timer_task:
+        bid_timer_task.cancel()
+    bid_timer_task = asyncio.create_task(bid_timer())
+
 @bot.tree.command(name="startauction", description="Let the auction begin!")
-async def startauction(interaction: discord.Interaction):
+@app_commands.describe(channel = "The Auction Channel")
+async def startauction(interaction: discord.Interaction, channel: discord.TextChannel):
+    global auction_active, auction_channel
+
+    if not interaction.user.guild_permissions.administrator:
+        await interaction.response.send_message("This action requires administrator privileges", ephemeral=True)
+        return
+    
+    if auction_active:
+        await interaction.response.send_message("Auction already running!", ephemeral=True)
+        return
+    
+    await interaction.response.defer(ephemeral=True)
+    
+    try:
+        with sqlite3.connect(DB_PATH) as conn:
+            c = conn.cursor()
+            c.execute("SELECT captain_id FROM teams")
+            captain_ids = {row[0] for row in c.fetchall()}
+
+            if captain_ids:
+                placeholders = ",".join("?" * len(captain_ids))
+
+                c.execute(
+                    f"""
+                    UPDATE players
+                    SET team_name = NULL
+                    WHERE user_id NOT in ({placeholders})
+                    AND team_name IS NOT NULL
+                    AND team_name != ''
+                    AND team_name != '__No_Bids__'
+                    """, tuple(captain_ids)
+                )
+                affected = c.rowcount
+                conn.commit()
+            else:
+                affected = 0
+            await interaction.followup.send(f"Reset **{affected}** player(s) back into auction pool")
+    except Exception as e:
+        await interaction.followup.send(f"Error resetting players into auction pool: {e}")
+    try:
+        with sqlite3.connect(DB_PATH) as conn:
+            c = conn.cursor()
+            c.execute("SELECT count(*) FROM players")
+            player_count = c.fetchone()[0]
+            if player_count == 0:
+                await interaction.followup.send("There are no players registered(enrolled) for auction in the database", ephemeral=True)
+                return
+    except Exception as e:
+        await interaction.followup.send(f"Error checking for players: {e}", ephemeral=True)
     try:
         with sqlite3.connect(DB_PATH) as conn:
             c = conn.cursor()
             c.execute("SELECT count(*) FROM teams")
             team_count = c.fetchone()[0]
             if team_count == 0:
-                await interaction.response.send_message("There are no teams registered in the database", ephemeral=True)
+                await interaction.followup.send("There are no teams registered in the database", ephemeral=True)
                 return
             c.execute("UPDATE teams SET budget = 145000000")
             updated = c.rowcount
             conn.commit()
 
-        await interaction.response.send_message(f"**All team budgets have been reset.**\n{updated} teams now have **145000000** each")
+        await interaction.followup.send(f"**All team budgets have been reset.**\n{updated} teams now have **145000000** each")
+        await channel.send(f"**All team budgets have been reset.**\n{updated} teams now have **145000000** each")
+
     except Exception as e:
-        await interaction.response.send_message(f"Error resetting budgets:{e}", ephemeral=True)
-    await interaction.response.send_message()
+        await interaction.followup.send(f"Error resetting budgets:{e}", ephemeral=True)
+
+
+    auction_active = True
+    auction_channel = channel
+
+    await channel.send("**Auction is live**\nUse !bid <amount>")
+    await start_player_auction()
+
+
+@bot.event
+async def on_message(message: discord.Message):
+    global current_bid, highest_bidder_id, highest_bidder_team, bid_timer_task
+
+    if message.author.bot:
+        return
+
+    if not auction_active:
+        return
+    
+    if message.channel != auction_channel:
+        return
+    
+    if not message.content.lower().startswith("!bid"):
+        return
+    
+    captain_roles = [r for r in message.author.roles if r.name.startswith("(C)")]
+    if not captain_roles:
+        await message.delete()
+        return
+    
+    team_name = captain_roles[0].name.replace("(C)", "", 1)
+
+    bid_text = message.content[4:].strip().upper()
+    try:
+        if bid_text.endswith("M"):
+            bid_amount = int(float(bid_text[:-1]) * 1_000_000)
+        else:
+            bid_amount = int(bid_text)
+
+    except ValueError:
+        await message.delete()
+        return
+    
+    if bid_amount <= current_bid:
+        await message.delete()
+        return
+    
+    with sqlite3.connect(DB_PATH) as conn:
+        c = conn.cursor()
+        c.execute("SELECT budget FROM teams WHERE name = ?", (team_name,))
+        budget = c.fetchone()[0]
+
+    if bid_amount > budget:
+        await message.delete()
+        return
+    
+    current_bid = bid_amount
+    highest_bidder_id = message.author.id
+    highest_bidder_team = team_name
+
+    await auction_channel.send(f"**New bid** {bid_amount:,} by {message.author.mention} ({team_name})\nTimer reset to 15s")
+
+    if bid_timer_task:
+        bid_timer_task.cancel()
+
+    bid_timer_task = asyncio.create_task(bid_timer())
+    await message.delete()
+
 
 @bot.tree.command(name="unenroll", description="Unenroll yourself from the game")
 async def unenroll(interaction: discord.Interaction):
@@ -319,13 +549,15 @@ async def createteam(interaction: discord.Interaction, team_name: str, shorthand
                 """,
                 (team_name, str(interaction.user.id))
             )
-            conn.commit
+            conn.commit()
 
-    except sqlite3.IntegrityError:
-        await interaction.response.send_message(f"Team **{team_name}** already exists!", ephemeral=True)
-        return
-    except Exception as e:
-        await interaction.response.send_message(f"Database error: {e}", ephemeral=True)
+    except sqlite3.IntegrityError as e:
+        if "UNIQUE constraint failed: teams.name" in str(e):
+            await interaction.response.send_message(f"Team {team_name} already exists!", ephemeral=True)
+        elif "UNIQUE constraint failed: teams.shorthandle" in str(e):
+            await interaction.response.send_message(f"shorthandle {shorthandle} already exists", ephemeral=True)
+        else:
+            await interaction.response.send_message(f"Database integrity error: {e}")
         return
     
     guild = interaction.guild
@@ -333,6 +565,16 @@ async def createteam(interaction: discord.Interaction, team_name: str, shorthand
     try:
         team_role = await guild.create_role(name=f"{team_name}", color=team_color, hoist=True, mentionable=True)
         captain_role = await guild.create_role(name=f"(C){team_name}", color=team_color)
+
+        with sqlite3.connect(DB_PATH) as conn:
+            c = conn.cursor()
+            c.execute(
+                """
+                UPDATE teams SET teamrole_id = ?, captainrole_id = ? WHERE name = ?
+                """,
+                (str(team_role.id), str(captain_role.id), team_name)
+            )
+            conn.commit()
 
         await interaction.user.add_roles(captain_role)
 
