@@ -9,4 +9,4 @@ venv/
 .DB_Store
 note.txt
 images/*
-webpages/*
+templates/*
