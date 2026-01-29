@@ -10,3 +10,5 @@ venv/
 note.txt
 images/*
 templates/*
+static/
+card_renderer.py

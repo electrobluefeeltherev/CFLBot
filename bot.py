@@ -43,6 +43,7 @@ def init_database():
         -- players
         CREATE TABLE IF NOT EXISTS players (
             user_id                     TEXT PRIMARY KEY,
+            player_name                 TEXT NOT NULL,
             team_name                   TEXT,
             joined_at                   TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (team_name)     REFERENCES teams(name) ON DELETE SET NULL
@@ -53,6 +54,9 @@ def init_database():
         CREATE TABLE IF NOT EXISTS stats (
             user_id                     TEXT PRIMARY KEY,
             total_runs                  INTEGER DEFAULT 0,
+            highest_score               INTEGER DEFAULT 0,
+            six                         INTEGER DEFAULT 0,
+            four                        INTEGER DEFAULT 0,
             batting_innings             INTEGER DEFAULT 0,
             times_out                   INTEGER DEFAULT 0,
             balls_faced                 INTEGER DEFAULT 0,
@@ -462,7 +466,8 @@ async def auctionreminder(interaction: discord.Interaction, time: str, channel: 
     await channel.send(embed=AuctionEmbed, content="@everyone" if mentions else None)
 
 @bot.tree.command(name="enroll", description="Enroll yourself into the Cricket Fantasy League")
-async def enroll(interaction: discord.Interaction):
+@app_commands.describe(player_name = "Your ingame Alias")
+async def enroll(interaction: discord.Interaction, player_name: str):
     user_id = str(interaction.user.id)
     
     try:
@@ -474,10 +479,10 @@ async def enroll(interaction: discord.Interaction):
                 return
             c.execute(
                 """
-                INSERT INTO players (user_id, team_name)
-                VALUES (?, NULL)
+                INSERT INTO players (user_id, team_name, player_name)
+                VALUES (?, NULL, ?)
                 """,
-                (user_id,)
+                (user_id, player_name)
             )
             conn.commit()
 

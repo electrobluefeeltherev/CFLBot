@@ -34,7 +34,7 @@ def view_all_tables():
             if rows:
                 print(tabulate(rows, headers=columns, tablefmt="github"))
             else:
-                print("→ Empty table")
+                print("Empty table")
 
     except Exception as e:
         print(f"Error: {e}")
