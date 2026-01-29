@@ -51,4 +51,3 @@ if __name__ == "__main__":
 
     html_path = render_player_card(test_user_id)
     print("HTML generated at:", html_path)
-
